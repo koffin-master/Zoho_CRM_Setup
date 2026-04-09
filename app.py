@@ -93,10 +93,11 @@ def update_record(record_id, access_token):
     return response
 
 
-from fastapi import Query
+from fastapi import Query, Request
+from fastapi.responses import HTMLResponse
 # 🚀 Main check-in endpoint
 @app.get("/checkin", response_class=HTMLResponse)
-def checkin(code: str, pin: str = None):
+def checkin(code: str, request: Request, pin: str = None):
 
     STAFF_PIN = "1234"
 
@@ -123,9 +124,12 @@ def checkin(code: str, pin: str = None):
 
     record = result["data"][0]
 
-    # 🔐 PIN check (before any action)
-    if not pin:
-        return f"""
+    staff_verified = request.cookies.get("staff_auth")
+
+    # 🔐 If not verified, ask PIN
+    if not staff_verified:
+        if not pin:
+            return f"""
 <html><body style='background-color:#111;color:white;text-align:center;margin-top:15%;font-size:30px;'>
 Enter Staff PIN<br><br>
 <form method='get'>
@@ -136,8 +140,9 @@ Enter Staff PIN<br><br>
 </body></html>
 """
 
-    if pin != STAFF_PIN:
-        return """
+    if not staff_verified:
+        if pin != STAFF_PIN:
+            return """
 <html><body style='background-color:red;color:white;text-align:center;margin-top:20%;font-size:40px;'>
 ❌ Wrong PIN
 </body></html>
@@ -156,8 +161,14 @@ Enter Staff PIN<br><br>
     # ✅ Success → update
     update_record(record["id"], access_token)
 
-    return f"""
+    response = HTMLResponse(content=f"""
 <html><body style='background-color:green;color:white;text-align:center;margin-top:20%;font-size:40px;'>
 ✅ Welcome!<br>Code: {code}
 </body></html>
-"""
+""")
+
+    # ✅ Set cookie after successful PIN entry
+    if not staff_verified:
+        response.set_cookie(key="staff_auth", value="1", max_age=36000)
+
+    return response
