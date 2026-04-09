@@ -118,7 +118,7 @@ def checkin(code: str, request: Request, pin: str = None):
     if "data" not in result or not result.get("data"):
         return f"""
 <html><body style='background-color:red;color:white;text-align:center;margin-top:20%;font-size:40px;'>
-❌ Code Not Found<br>{code}
+❌ Not Recognised.<br>{code}
 </body></html>
 """
 
