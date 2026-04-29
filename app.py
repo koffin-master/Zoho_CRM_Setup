@@ -1,36 +1,21 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
 import requests
-from datetime import datetime
+import os
 from dotenv import load_dotenv
-import time
 
 load_dotenv()
-import os
 
 app = FastAPI()
 
-# 🔑 Your credentials
+# 🔐 ENV VARIABLES (set these in Render later)
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 
-MODULE = "Event_Invites"  # or Contacts
 
-# Global token cache
-ACCESS_TOKEN = None
-TOKEN_EXPIRY = None
-
-
-# 🔄 Get fresh access token
+# 🔁 Get Zoho Access Token
 def get_access_token():
-    global ACCESS_TOKEN, TOKEN_EXPIRY
-
-    # reuse token if still valid
-    if ACCESS_TOKEN and TOKEN_EXPIRY and time.time() < TOKEN_EXPIRY:
-        return ACCESS_TOKEN
-
-    url = "https://accounts.zoho.in/oauth/v2/token"
+    url = "https://accounts.zoho.com/oauth/v2/token"
 
     params = {
         "refresh_token": REFRESH_TOKEN,
@@ -40,135 +25,98 @@ def get_access_token():
     }
 
     response = requests.post(url, params=params)
-    data = response.json()
-    print("TOKEN RESPONSE:", data)
-
-    if "access_token" not in data:
-        return None
-
-    ACCESS_TOKEN = data["access_token"]
-    TOKEN_EXPIRY = time.time() + data.get("expires_in", 3600) - 60
-
-    return ACCESS_TOKEN
+    return response.json().get("access_token")
 
 
-# 🔍 Search record
-def search_record(code, access_token):
-    url = f"https://www.zohoapis.in/crm/v2/{MODULE}/search"
+# 🧠 Score Logic
+def calculate_score(data):
+    score = 0
 
+    if data.get("product") == "A":
+        score += 10
+    elif data.get("product") == "B":
+        score += 5
+
+    try:
+        if int(data.get("budget", 0)) > 10000:
+            score += 20
+    except:
+        pass
+
+    try:
+        if int(data.get("team_size", 0)) > 5:
+            score += 10
+    except:
+        pass
+
+    return score
+
+
+# 🔍 Get current score from Zoho
+def get_existing_score(phone, access_token):
     headers = {
         "Authorization": f"Zoho-oauthtoken {access_token}"
     }
 
-    params = {
-        "criteria": f"(Invite_Code:equals:{code})"
-    }
+    url = f"https://www.zohoapis.com/crm/v2/Leads/search?phone={phone}"
+    res = requests.get(url, headers=headers).json()
 
-    res = requests.get(url, headers=headers, params=params)
-    try:
-        return res.json()
-    except Exception:
-        return {"error": res.text}
+    if "data" in res:
+        lead = res["data"][0]
+        lead_id = lead["id"]
+        current_score = lead.get("Santulit_score1", 0) or 0
+        return lead_id, int(current_score)
+
+    return None, 0
 
 
-# ✏️ Update record
-def update_record(record_id, access_token):
-    url = f"https://www.zohoapis.in/crm/v2/{MODULE}"
-
+# 🔄 Update Zoho
+def update_zoho(lead_id, new_score, access_token):
     headers = {
-        "Authorization": f"Zoho-oauthtoken {access_token}",
-        "Content-Type": "application/json"
+        "Authorization": f"Zoho-oauthtoken {access_token}"
     }
 
-    data = {
-        "data": [{
-            "id": record_id,
-            "Check_In_Status": "Checked",
-            "Checkin_time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S+05:30")
-        }]
+    url = "https://www.zohoapis.com/crm/v2/Leads"
+
+    payload = {
+        "data": [
+            {
+                "id": lead_id,
+                "Santulit_score1": new_score
+            }
+        ]
     }
 
-    response = requests.put(url, headers=headers, json=data)
-    print("UPDATE RESPONSE:", response.text)
-    return response
+    requests.put(url, json=payload, headers=headers)
 
 
-from fastapi import Query, Request
-from fastapi.responses import HTMLResponse
-# 🚀 Main check-in endpoint
-@app.get("/checkin", response_class=HTMLResponse)
-def checkin(code: str, request: Request, pin: str = None):
+# 🚀 MAIN WEBHOOK
+@app.post("/webhook")
+async def webhook(req: Request):
+    data = await req.json()
 
-    STAFF_PIN = "1234"
+    phone = data.get("phone")
+
+    if not phone:
+        return {"error": "phone is required"}
 
     access_token = get_access_token()
 
-    if not access_token:
-        return """
-<html><body style='background-color:red;color:white;text-align:center;margin-top:20%;font-size:40px;'>
-❌ Token Error
-</body></html>
-"""
+    # Step 1: get existing score
+    lead_id, existing_score = get_existing_score(phone, access_token)
 
-    from fastapi import Request
+    if not lead_id:
+        return {"error": "Lead not found in Zoho"}
 
-    result = search_record(code, access_token)
+    # Step 2: calculate new score
+    new_points = calculate_score(data)
+    final_score = existing_score + new_points
 
-    # ❌ Code not found
-    if "data" not in result or not result.get("data"):
-        return f"""
-<html><body style='background-color:red;color:white;text-align:center;margin-top:20%;font-size:40px;'>
-❌ Not Recognised.<br>{code}
-</body></html>
-"""
+    # Step 3: update Zoho
+    update_zoho(lead_id, final_score, access_token)
 
-    record = result["data"][0]
-
-    staff_verified = request.cookies.get("staff_auth")
-
-    # 🔐 If not verified, ask PIN
-    if not staff_verified:
-        if not pin:
-            return f"""
-<html><body style='background-color:#111;color:white;text-align:center;margin-top:15%;font-size:30px;'>
-Enter Staff PIN<br><br>
-<form method='get'>
-<input type='hidden' name='code' value='{code}' />
-<input type='password' name='pin' placeholder='Enter PIN' style='font-size:20px;padding:10px'/><br><br>
-<button type='submit' style='font-size:20px;padding:10px'>Confirm Check-In</button>
-</form>
-</body></html>
-"""
-
-    if not staff_verified:
-        if pin != STAFF_PIN:
-            return """
-<html><body style='background-color:red;color:white;text-align:center;margin-top:20%;font-size:40px;'>
-❌ Wrong PIN
-</body></html>
-"""
-
-    status = record.get("Check_In_Status", "").strip().lower()
-
-    # ⚠️ Duplicate (only if actually checked)
-    if status == "checked":
-        return """
-<html><body style='background-color:orange;color:black;text-align:center;margin-top:20%;font-size:40px;'>
-⚠️ Already Checked-In
-</body></html>
-"""
-
-    # ✅ Success → update
-    update_record(record["id"], access_token)
-
-    response = HTMLResponse(content=f"""
-<html><body style='background-color:green;color:white;text-align:center;margin-top:20%;font-size:40px;'>
-✅ Welcome!<br>Code: {code}
-</body></html>
-""")
-
-    # ✅ Set cookie after successful PIN entry
-    if not staff_verified:
-        response.set_cookie(key="staff_auth", value="1", max_age=36000)
-
-    return response
+    return {
+        "status": "success",
+        "added_score": new_points,
+        "total_score": final_score
+    }
